@@ -61,7 +61,7 @@ class ProductStore {
   }
 
   findAll(filters = {}) {
-    let results = Array.from(this.products.values());
+    let results = Array.from(this.products.values()).filter(p => p.archivedAt === null);
 
     if (filters.category) {
       results = results.filter(p => p.category === filters.category);
@@ -74,6 +74,11 @@ class ProductStore {
     }
     if (filters.maxPrice !== undefined) {
       results = results.filter(p => p.price <= filters.maxPrice);
+    }
+    if (filters.inStock === true) {
+      results = results.filter(p => p.stock > 0);
+    } else if (filters.inStock === false) {
+      results = results.filter(p => p.stock <= 0);
     }
     if (filters.search) {
       const searchLower = filters.search.toLowerCase();
@@ -88,12 +93,16 @@ class ProductStore {
   }
 
   findById(id) {
-    return this.products.get(id) || null;
+    const product = this.products.get(id);
+    if (!product || product.archivedAt !== null) {
+      return null;
+    }
+    return product;
   }
 
   findBySku(sku) {
     for (const product of this.products.values()) {
-      if (product.sku === sku) {
+      if (product.sku === sku && product.archivedAt === null) {
         return product;
       }
     }
@@ -125,7 +134,8 @@ class ProductStore {
       price: Number(data.price.toFixed(2)),
       stock: data.stock || 0,
       status: data.status || 'active',
-      createdAt: new Date()
+      createdAt: new Date(),
+      archivedAt: null
     };
 
     this.products.set(product.id, product);
@@ -171,11 +181,22 @@ class ProductStore {
   }
 
   delete(id) {
-    const product = this.findById(id);
-    if (!product) {
+    const product = this.products.get(id);
+    if (!product || product.archivedAt !== null) {
       return false;
     }
-    this.products.delete(id);
+    product.archivedAt = new Date();
+    this.products.set(id, product);
+    return true;
+  }
+
+  restore(id) {
+    const product = this.products.get(id);
+    if (!product || product.archivedAt === null) {
+      return false;
+    }
+    product.archivedAt = null;
+    this.products.set(id, product);
     return true;
   }
 }
