@@ -7,6 +7,12 @@ const createResponse = (success, data = null, error = null) => ({
   error
 });
 
+// Strip internal fields from API responses
+const sanitizeProduct = (product) => {
+  const { archivedAt, ...safe } = product;
+  return safe;
+};
+
 const getAllProductsHandler = (req, res) => {
   const filters = {
     category: req.query.category,
@@ -18,7 +24,7 @@ const getAllProductsHandler = (req, res) => {
   };
 
   const products = productStore.findAll(filters);
-  res.json(createResponse(true, products));
+  res.json(createResponse(true, products.map(sanitizeProduct)));
 };
 
 const getProductByIdHandler = (req, res) => {
@@ -29,23 +35,44 @@ const getProductByIdHandler = (req, res) => {
     return res.status(404).json(createResponse(false, null, { message: 'Product not found', code: 'NOT_FOUND' }));
   }
 
-  res.json(createResponse(true, product));
+  res.json(createResponse(true, sanitizeProduct(product)));
 };
 
-const createProductHandler = (req, res) => {
-  const product = productStore.create(req.body);
-  res.status(201).json(createResponse(true, product));
-};
-
-const updateProductHandler = (req, res) => {
-  const { id } = req.params;
-  const product = productStore.update(id, req.body);
-
-  if (!product) {
-    return res.status(404).json(createResponse(false, null, { message: 'Product not found', code: 'NOT_FOUND' }));
+const createProductHandler = async (req, res) => {
+  try {
+    const product = productStore.create(req.body);
+    res.status(201).json(createResponse(true, sanitizeProduct(product)));
+  } catch (err) {
+    if (err.statusCode === 409) {
+      // Generic conflict error - don't leak which SKU exists
+      return res.status(409).json(createResponse(false, null, {
+        message: 'Validation failed',
+        code: 'CONFLICT'
+      }));
+    }
+    throw err;
   }
+};
 
-  res.json(createResponse(true, product));
+const updateProductHandler = async (req, res) => {
+  const { id } = req.params;
+  try {
+    const product = productStore.update(id, req.body);
+
+    if (!product) {
+      return res.status(404).json(createResponse(false, null, { message: 'Product not found', code: 'NOT_FOUND' }));
+    }
+
+    res.json(createResponse(true, sanitizeProduct(product)));
+  } catch (err) {
+    if (err.statusCode === 409) {
+      return res.status(409).json(createResponse(false, null, {
+        message: 'Validation failed',
+        code: 'CONFLICT'
+      }));
+    }
+    throw err;
+  }
 };
 
 const deleteProductHandler = (req, res) => {
