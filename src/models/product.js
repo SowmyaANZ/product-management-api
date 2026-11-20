@@ -5,7 +5,10 @@ const VALID_STATUSES = ['active', 'inactive', 'discontinued'];
 
 class ProductStore {
   constructor() {
-    this.products = new Map();
+    // Primary index: id -> product
+    this.byId = new Map();
+    // Secondary index: sku -> product (for O(1) SKU lookups)
+    this.bySku = new Map();
   }
 
   validateProduct(data, isUpdate = false) {
@@ -61,39 +64,52 @@ class ProductStore {
   }
 
   findAll(filters = {}) {
-    let results = Array.from(this.products.values()).filter(p => p.archivedAt === null);
+    // Early exit: if no filters, return all non-archived directly
+    const hasFilters = Object.keys(filters).some(
+      k => filters[k] !== undefined && filters[k] !== ''
+    );
 
-    if (filters.category) {
-      results = results.filter(p => p.category === filters.category);
-    }
-    if (filters.status) {
-      results = results.filter(p => p.status === filters.status);
-    }
-    if (filters.minPrice !== undefined) {
-      results = results.filter(p => p.price >= filters.minPrice);
-    }
-    if (filters.maxPrice !== undefined) {
-      results = results.filter(p => p.price <= filters.maxPrice);
-    }
-    if (filters.inStock === true) {
-      results = results.filter(p => p.stock > 0);
-    } else if (filters.inStock === false) {
-      results = results.filter(p => p.stock <= 0);
-    }
-    if (filters.search) {
-      const searchLower = filters.search.toLowerCase();
-      results = results.filter(p =>
-        p.name.toLowerCase().includes(searchLower) ||
-        p.sku.toLowerCase().includes(searchLower) ||
-        (p.description && p.description.toLowerCase().includes(searchLower))
-      );
+    // Iterate values once, apply all filters in single pass
+    const results = [];
+    const { category, status, minPrice, maxPrice, inStock, search } = filters;
+    const searchLower = search != null ? search.toLowerCase() : undefined;
+
+    for (const product of this.byId.values()) {
+      // Skip archived
+      if (product.archivedAt !== null) continue;
+
+      // Category filter
+      if (category && product.category !== category) continue;
+
+      // Status filter
+      if (status && product.status !== status) continue;
+
+      // Price range filters
+      if (minPrice !== undefined && product.price < minPrice) continue;
+      if (maxPrice !== undefined && product.price > maxPrice) continue;
+
+      // Stock filter
+      if (inStock === true && product.stock <= 0) continue;
+      if (inStock === false && product.stock > 0) continue;
+
+      // Search filter (case-insensitive substring match)
+      if (searchLower) {
+        const haystack = `${product.name} ${product.sku} ${product.description || ''}`.toLowerCase();
+        if (!haystack.includes(searchLower)) continue;
+      }
+
+      results.push(product);
     }
 
-    return results.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    // Sort by createdAt descending (newest first)
+    results.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+
+    return results;
   }
 
   findById(id) {
-    const product = this.products.get(id);
+    // O(1) direct Map lookup
+    const product = this.byId.get(id);
     if (!product || product.archivedAt !== null) {
       return null;
     }
@@ -101,12 +117,13 @@ class ProductStore {
   }
 
   findBySku(sku) {
-    for (const product of this.products.values()) {
-      if (product.sku === sku && product.archivedAt === null) {
-        return product;
-      }
+    // O(1) direct Map lookup
+    const normalizedSku = sku != null && typeof sku.trim === 'function' ? sku.trim() : sku;
+    const product = this.bySku.get(normalizedSku);
+    if (!product || product.archivedAt !== null) {
+      return null;
     }
-    return null;
+    return product;
   }
 
   create(data) {
@@ -118,8 +135,9 @@ class ProductStore {
       throw error;
     }
 
-    const existingSku = this.findBySku(data.sku);
-    if (existingSku) {
+    const sku = data.sku.trim();
+    // O(1) SKU uniqueness check
+    if (this.bySku.has(sku)) {
       const error = new Error('SKU already exists');
       error.statusCode = 409;
       throw error;
@@ -128,7 +146,7 @@ class ProductStore {
     const product = {
       id: uuidv4(),
       name: data.name.trim(),
-      sku: data.sku.trim(),
+      sku,
       description: data.description ? data.description.trim() : null,
       category: data.category || 'other',
       price: Number(data.price.toFixed(2)),
@@ -138,13 +156,17 @@ class ProductStore {
       archivedAt: null
     };
 
-    this.products.set(product.id, product);
+    // Maintain both indexes
+    this.byId.set(product.id, product);
+    this.bySku.set(product.sku, product);
+
     return product;
   }
 
   update(id, patch) {
-    const product = this.findById(id);
-    if (!product) {
+    // O(1) lookup
+    const product = this.byId.get(id);
+    if (!product || product.archivedAt !== null) {
       return null;
     }
 
@@ -156,9 +178,10 @@ class ProductStore {
       throw error;
     }
 
-    if (patch.sku && patch.sku !== product.sku) {
-      const existingSku = this.findBySku(patch.sku);
-      if (existingSku) {
+    // Handle SKU change: update secondary index
+    const newSku = patch.sku != null && typeof patch.sku.trim === 'function' ? patch.sku.trim() : undefined;
+    if (newSku && newSku !== product.sku) {
+      if (this.bySku.has(newSku)) {
         const error = new Error('SKU already exists');
         error.statusCode = 409;
         throw error;
@@ -168,36 +191,66 @@ class ProductStore {
     const updatedProduct = {
       ...product,
       name: patch.name !== undefined ? patch.name.trim() : product.name,
-      sku: patch.sku !== undefined ? patch.sku.trim() : product.sku,
-      description: patch.description !== undefined ? (patch.description ? patch.description.trim() : null) : product.description,
+      sku: newSku !== undefined ? newSku : product.sku,
+      description: patch.description !== undefined
+        ? (patch.description ? patch.description.trim() : null)
+        : product.description,
       category: patch.category !== undefined ? patch.category : product.category,
       price: patch.price !== undefined ? Number(patch.price.toFixed(2)) : product.price,
       stock: patch.stock !== undefined ? patch.stock : product.stock,
       status: patch.status !== undefined ? patch.status : product.status
     };
 
-    this.products.set(id, updatedProduct);
+    // Maintain both indexes
+    this.byId.set(id, updatedProduct);
+    // If SKU changed, update secondary index
+    if (updatedProduct.sku !== product.sku) {
+      this.bySku.delete(product.sku);
+      this.bySku.set(updatedProduct.sku, updatedProduct);
+    }
+
     return updatedProduct;
   }
 
   delete(id) {
-    const product = this.products.get(id);
+    // O(1) lookup
+    const product = this.byId.get(id);
     if (!product || product.archivedAt !== null) {
       return false;
     }
+
     product.archivedAt = new Date();
-    this.products.set(id, product);
+    this.byId.set(id, product);
+    // Keep in bySku for SKU uniqueness enforcement on restore/create
+    // (archived products still reserve their SKU)
+
     return true;
   }
 
   restore(id) {
-    const product = this.products.get(id);
+    // O(1) lookup
+    const product = this.byId.get(id);
     if (!product || product.archivedAt === null) {
       return false;
     }
+
     product.archivedAt = null;
-    this.products.set(id, product);
+    this.byId.set(id, product);
     return true;
+  }
+
+  // Utility: get total count (including archived) for admin/debug
+  size() {
+    return this.byId.size;
+  }
+
+  // Utility: get active count for health checks
+  activeCount() {
+    let count = 0;
+    for (const p of this.byId.values()) {
+      if (p.archivedAt === null) count++;
+    }
+    return count;
   }
 }
 

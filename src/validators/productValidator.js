@@ -109,6 +109,7 @@ export const validateFilters = [
     .isIn(['true', 'false']).withMessage('inStock must be true or false'),
   query('search')
     .optional()
-    .isString().withMessage('search must be a string'),
+    .isString().withMessage('search must be a string')
+    .isLength({ max: 100 }).withMessage('search must be ≤100 characters'),
   handleValidationErrors
 ];
