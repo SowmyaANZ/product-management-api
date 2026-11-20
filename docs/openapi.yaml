@@ -1,0 +1,877 @@
+openapi: 3.1.0
+info:
+  title: Product Management API
+  version: 1.0.0
+  description: |
+    A RESTful API for managing product catalogues with full CRUD operations,
+    soft-archive (recoverable delete), filtering, search, and SKU uniqueness enforcement.
+    Built with Express.js (ESM), featuring dual-index in-memory storage for O(1) lookups
+    by ID and SKU.
+  contact:
+    name: Product Management API Team
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:3000
+    description: Development server
+
+tags:
+  - name: Products
+    description: Product catalogue management
+
+components:
+  schemas:
+    # Standardized API response envelope
+    ApiEnvelope:
+      type: object
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          description: Indicates if the request succeeded
+        data:
+          description: Response payload (present on success)
+          nullable: true
+        error:
+          description: Error details (present on failure)
+          nullable: true
+          $ref: '#/components/schemas/ErrorResponse'
+
+    # Error response object
+    ErrorResponse:
+      type: object
+      required:
+        - message
+        - code
+      properties:
+        message:
+          type: string
+          description: Human-readable error message
+          example: "Validation failed"
+        code:
+          type: string
+          description: Machine-readable error code
+          enum:
+            - VALIDATION_ERROR
+            - NOT_FOUND
+            - CONFLICT
+            - INVALID_JSON
+            - INTERNAL_ERROR
+            - RATE_LIMITED
+          example: "VALIDATION_ERROR"
+        details:
+          type: array
+          description: Validation error details (only for VALIDATION_ERROR)
+          items:
+            type: string
+          example:
+            - "name is required"
+            - "price must be a positive number"
+
+    # Full product object as stored internally (includes archivedAt)
+    Product:
+      type: object
+      required:
+        - id
+        - name
+        - sku
+        - category
+        - price
+        - stock
+        - status
+        - createdAt
+        - archivedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier (v4 UUID)
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Product name
+          example: "Wireless Mouse"
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Stock Keeping Unit (unique)
+          example: "WM-001"
+        description:
+          type: string
+          nullable: true
+          description: Optional product description
+          example: "Ergonomic wireless mouse with USB receiver"
+        category:
+          type: string
+          enum:
+            - electronics
+            - clothing
+            - food
+            - books
+            - other
+          description: Product category
+          example: "electronics"
+        price:
+          type: number
+          format: double
+          minimum: 0.01
+          multipleOf: 0.01
+          description: "Price in currency units (positive, max 2 decimal places)"
+          example: 29.99
+        stock:
+          type: integer
+          minimum: 0
+          description: Available quantity (non-negative integer)
+          example: 50
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - discontinued
+          description: Product status
+          example: "active"
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp of creation (ISO 8601)
+          example: "2024-01-15T10:30:00.000Z"
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Soft-delete timestamp; null if active (internal only)
+          example: null
+
+    # Public product object returned by API (archivedAt stripped)
+    PublicProduct:
+      type: object
+      required:
+        - id
+        - name
+        - sku
+        - category
+        - price
+        - stock
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique identifier (v4 UUID)
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Product name
+          example: "Wireless Mouse"
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Stock Keeping Unit (unique)
+          example: "WM-001"
+        description:
+          type: string
+          nullable: true
+          description: Optional product description
+          example: "Ergonomic wireless mouse with USB receiver"
+        category:
+          type: string
+          enum:
+            - electronics
+            - clothing
+            - food
+            - books
+            - other
+          description: Product category
+          example: "electronics"
+        price:
+          type: number
+          format: double
+          minimum: 0.01
+          multipleOf: 0.01
+          description: "Price in currency units (positive, max 2 decimal places)"
+          example: 29.99
+        stock:
+          type: integer
+          minimum: 0
+          description: Available quantity (non-negative integer)
+          example: 50
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - discontinued
+          description: Product status
+          example: "active"
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp of creation (ISO 8601)
+          example: "2024-01-15T10:30:00.000Z"
+
+    # Product input for POST /products (all required except optional fields)
+    ProductInput:
+      type: object
+      required:
+        - name
+        - sku
+        - price
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Product name (required)
+          example: "Wireless Mouse"
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Unique SKU (required)
+          example: "WM-001"
+        description:
+          type: string
+          nullable: true
+          description: Optional description
+          example: "Ergonomic wireless mouse with USB receiver"
+        category:
+          type: string
+          enum:
+            - electronics
+            - clothing
+            - food
+            - books
+            - other
+          default: "other"
+          description: "Product category (default: other)"
+          example: "electronics"
+        price:
+          type: number
+          format: double
+          minimum: 0.01
+          multipleOf: 0.01
+          description: "Positive price, max 2 decimal places (required)"
+          example: 29.99
+        stock:
+          type: integer
+          minimum: 0
+          default: 0
+          description: "Initial stock quantity (default: 0)"
+          example: 50
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - discontinued
+          default: "active"
+          description: "Product status (default: active)"
+          example: "active"
+
+    # Product patch for PATCH /products/:id (all fields optional)
+    ProductPatch:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Updated product name
+          example: "Wireless Mouse Pro"
+        sku:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: "Updated SKU (must be unique if changed)"
+          example: "WM-001-PRO"
+        description:
+          type: string
+          nullable: true
+          description: "Updated description (null to clear)"
+          example: "Upgraded ergonomic wireless mouse"
+        category:
+          type: string
+          enum:
+            - electronics
+            - clothing
+            - food
+            - books
+            - other
+          description: Updated category
+          example: "electronics"
+        price:
+          type: number
+          format: double
+          minimum: 0.01
+          multipleOf: 0.01
+          description: Updated price
+          example: 34.99
+        stock:
+          type: integer
+          minimum: 0
+          description: Updated stock quantity
+          example: 45
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - discontinued
+          description: Updated status
+          example: "active"
+
+    # Success responses
+    ProductResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [true]
+            data:
+              $ref: '#/components/schemas/PublicProduct'
+
+    ProductListResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [true]
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/PublicProduct'
+
+    MessageResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [true]
+            data:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: string
+                  example: "Product archived successfully"
+
+    # Error responses
+    ValidationErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [false]
+            data:
+              type: null
+            error:
+              $ref: '#/components/schemas/ErrorResponse'
+              properties:
+                code:
+                  enum: [VALIDATION_ERROR]
+
+    NotFoundResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [false]
+            data:
+              type: null
+            error:
+              $ref: '#/components/schemas/ErrorResponse'
+              properties:
+                code:
+                  enum: [NOT_FOUND]
+
+    ConflictResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [false]
+            data:
+              type: null
+            error:
+              $ref: '#/components/schemas/ErrorResponse'
+              properties:
+                code:
+                  enum: [CONFLICT]
+
+    RateLimitedResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiEnvelope'
+        - type: object
+          properties:
+            success:
+              type: boolean
+              enum: [false]
+            data:
+              type: null
+            error:
+              $ref: '#/components/schemas/ErrorResponse'
+              properties:
+                code:
+                  enum: [RATE_LIMITED]
+
+  parameters:
+    productId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Product UUID
+      example: "550e8400-e29b-41d4-a716-446655440000"
+
+    categoryParam:
+      name: category
+      in: query
+      schema:
+        type: string
+        enum:
+          - electronics
+          - clothing
+          - food
+          - books
+          - other
+      description: Filter by exact category match
+      example: "electronics"
+
+    statusParam:
+      name: status
+      in: query
+      schema:
+        type: string
+        enum:
+          - active
+          - inactive
+          - discontinued
+      description: Filter by exact status match
+      example: "active"
+
+    minPriceParam:
+      name: minPrice
+      in: query
+      schema:
+        type: number
+        format: double
+        minimum: 0
+      description: Minimum price (inclusive)
+      example: 10
+
+    maxPriceParam:
+      name: maxPrice
+      in: query
+      schema:
+        type: number
+        format: double
+        minimum: 0
+      description: Maximum price (inclusive)
+      example: 100
+
+    inStockParam:
+      name: inStock
+      in: query
+      schema:
+        type: string
+        enum:
+          - "true"
+          - "false"
+      description: 'Filter by stock availability ("true" = stock > 0, "false" = stock = 0)'
+      example: "true"
+
+    searchParam:
+      name: search
+      in: query
+      schema:
+        type: string
+        maxLength: 100
+      description: Case-insensitive substring match on name, SKU, or description (max 100 chars)
+      example: "wireless"
+
+paths:
+  /products:
+    get:
+      tags:
+        - Products
+      summary: List all products with optional filters
+      description: |
+        Returns a paginated list of non-archived products.
+        Supports filtering by category, status, price range, stock availability, and text search.
+        Results sorted by createdAt descending (newest first).
+      parameters:
+        - $ref: '#/components/parameters/categoryParam'
+        - $ref: '#/components/parameters/statusParam'
+        - $ref: '#/components/parameters/minPriceParam'
+        - $ref: '#/components/parameters/maxPriceParam'
+        - $ref: '#/components/parameters/inStockParam'
+        - $ref: '#/components/parameters/searchParam'
+      responses:
+        '200':
+          description: Array of products (empty if none match)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductListResponse'
+                example:
+                  success: true
+                  data:
+                    - id: "550e8400-e29b-41d4-a716-446655440000"
+                      name: "Wireless Mouse"
+                      sku: "WM-001"
+                      description: "Ergonomic wireless mouse with USB receiver"
+                      category: "electronics"
+                      price: 29.99
+                      stock: 50
+                      status: "active"
+                      createdAt: "2024-01-15T10:30:00.000Z"
+                    - id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+                      name: "Cotton T-Shirt"
+                      sku: "CT-002"
+                      description: "Comfortable cotton t-shirt"
+                      category: "clothing"
+                      price: 19.99
+                      stock: 100
+                      status: "active"
+                      createdAt: "2024-01-14T09:15:00.000Z"
+                  error: null
+
+    post:
+      tags:
+        - Products
+      summary: Create a new product
+      description: |
+        Creates a new product with validation.
+        Enforces SKU uniqueness (returns 409 if duplicate).
+        Returns the created product with auto-generated id and createdAt.
+        Rate limited: 30 requests per minute per IP.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductInput'
+            example:
+              name: "Wireless Mouse"
+              sku: "WM-001"
+              description: "Ergonomic wireless mouse with USB receiver"
+              category: "electronics"
+              price: 29.99
+              stock: 50
+              status: "active"
+      responses:
+        '201':
+          description: Product created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+                example:
+                  success: true
+                  data:
+                    id: "550e8400-e29b-41d4-a716-446655440000"
+                    name: "Wireless Mouse"
+                    sku: "WM-001"
+                    description: "Ergonomic wireless mouse with USB receiver"
+                    category: "electronics"
+                    price: 29.99
+                    stock: 50
+                    status: "active"
+                    createdAt: "2024-01-15T10:30:00.000Z"
+                  error: null
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Validation failed"
+                    code: "VALIDATION_ERROR"
+                    details:
+                      - "name is required"
+                      - "price must be a positive number"
+        '409':
+          description: SKU already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Validation failed"
+                    code: "CONFLICT"
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitedResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Too many requests"
+                    code: "RATE_LIMITED"
+
+  /products/{id}:
+    get:
+      tags:
+        - Products
+      summary: Get a single product by UUID
+      description: |
+        Returns the product if found and not archived.
+        Returns 404 if product doesn't exist or is archived.
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '200':
+          description: Product found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+                example:
+                  success: true
+                  data:
+                    id: "550e8400-e29b-41d4-a716-446655440000"
+                    name: "Wireless Mouse"
+                    sku: "WM-001"
+                    description: "Ergonomic wireless mouse with USB receiver"
+                    category: "electronics"
+                    price: 29.99
+                    stock: 50
+                    status: "active"
+                    createdAt: "2024-01-15T10:30:00.000Z"
+                  error: null
+        '404':
+          description: Product not found or archived
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Product not found"
+                    code: "NOT_FOUND"
+
+    patch:
+      tags:
+        - Products
+      summary: Partially update a product
+      description: |
+        Updates only the provided fields (all optional).
+        Preserves id, createdAt, and archivedAt (cannot be modified).
+        If SKU is changed, enforces uniqueness (returns 409 if conflict).
+        Returns 404 if product not found or archived.
+        Rate limited: 30 requests per minute per IP.
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProductPatch'
+            example:
+              price: 24.99
+              stock: 45
+      responses:
+        '200':
+          description: Product updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductResponse'
+                example:
+                  success: true
+                  data:
+                    id: "550e8400-e29b-41d4-a716-446655440000"
+                    name: "Wireless Mouse"
+                    sku: "WM-001"
+                    description: "Ergonomic wireless mouse with USB receiver"
+                    category: "electronics"
+                    price: 24.99
+                    stock: 45
+                    status: "active"
+                    createdAt: "2024-01-15T10:30:00.000Z"
+                  error: null
+        '404':
+          description: Product not found or archived
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Product not found"
+                    code: "NOT_FOUND"
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Validation failed"
+                    code: "VALIDATION_ERROR"
+                    details:
+                      - "price must be a positive number"
+        '409':
+          description: New SKU already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConflictResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Validation failed"
+                    code: "CONFLICT"
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitedResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Too many requests"
+                    code: "RATE_LIMITED"
+
+    delete:
+      tags:
+        - Products
+      summary: Soft-archive a product
+      description: |
+        Marks product as archived (sets archivedAt timestamp).
+        Product is hidden from listings but SKU remains reserved.
+        Returns 404 if product not found or already archived.
+        Rate limited: 30 requests per minute per IP.
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '200':
+          description: Product archived successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+                example:
+                  success: true
+                  data:
+                    message: "Product archived successfully"
+                  error: null
+        '404':
+          description: Product not found or already archived
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Product not found"
+                    code: "NOT_FOUND"
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitedResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Too many requests"
+                    code: "RATE_LIMITED"
+
+  /products/{id}/restore:
+    delete:
+      tags:
+        - Products
+      summary: Restore a soft-archived product
+      description: |
+        Clears archivedAt timestamp; product reappears in listings.
+        Returns 404 if product not found or not archived.
+        Rate limited: 30 requests per minute per IP.
+      parameters:
+        - $ref: '#/components/parameters/productId'
+      responses:
+        '200':
+          description: Product restored successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+                example:
+                  success: true
+                  data:
+                    message: "Product restored successfully"
+                  error: null
+        '404':
+          description: Product not found or not archived
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Product not found"
+                    code: "NOT_FOUND"
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitedResponse'
+                example:
+                  success: false
+                  data: null
+                  error:
+                    message: "Too many requests"
+                    code: "RATE_LIMITED"
